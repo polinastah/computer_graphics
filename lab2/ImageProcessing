@@ -1,1 +1,799 @@
+import javax.swing.*;
+import javax.swing.border.TitledBorder;
+import javax.swing.event.ChangeListener;
+import javax.swing.plaf.basic.BasicSliderUI;
+import javax.swing.text.*;
+import java.awt.*;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.io.IOException;
+import javax.imageio.ImageIO;
 
+public class ImageProcessing extends JFrame {
+
+    static class RangeModel extends SpinnerNumberModel {
+        private int min, max, step;
+
+        RangeModel(int min, int max, int step) {
+            super(min, min, max, step);
+            this.min = min;
+            this.max = max;
+            this.step = step;
+        }
+
+        void updateRange(int min, int max) {
+            this.min = min;
+            this.max = max;
+            int c = cur();
+            if (c < min) setValue(min);
+            else if (c > max) setValue(max);
+            setMinimum(min);
+            setMaximum(max);
+        }
+
+        private int cur() {
+            return getNumber().intValue();
+        }
+
+        @Override
+        public Object getNextValue() {
+            int c = cur();
+            if (c >= max) return null;
+            return Math.min(max, c + step);
+        }
+
+        @Override
+        public Object getPreviousValue() {
+            int c = cur();
+            if (c <= min) return null;
+            return Math.max(min, c - step);
+        }
+    }
+
+    static class JumpSliderUI extends BasicSliderUI {
+        JumpSliderUI(JSlider b) {
+            super(b);
+        }
+
+        @Override
+        protected TrackListener createTrackListener(JSlider s) {
+            return new TrackListener() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    if (!slider.isEnabled() || !SwingUtilities.isLeftMouseButton(e)) return;
+                    if (!thumbRect.contains(e.getX(), e.getY())) {
+                        slider.setValue(valueForXPosition(e.getX()));
+                    }
+                    super.mousePressed(e);
+                }
+
+                @Override
+                public boolean shouldScroll(int direction) {
+                    return false;
+                }
+            };
+        }
+
+        @Override
+        protected void scrollDueToClickInTrack(int direction) {}
+    }
+
+    static class Channel {
+        final JSlider slider;
+        final JSpinner spinner;
+        final JTextField field = new JTextField();
+        final RangeModel model;
+        int min, max;
+        int lastValid;
+        boolean programmatic = false;
+        Runnable onChange = () -> {};
+        Runnable commit;
+
+        Channel(int min, int max, int initial) {
+            this.min = min;
+            this.max = max;
+            this.lastValid = Math.max(min, Math.min(max, initial));
+
+            slider = new JSlider(min, max, lastValid);
+            slider.setUI(new JumpSliderUI(slider));
+            model = new RangeModel(min, max, 1);
+            spinner = new JSpinner(model);
+
+            JPanel editor = new JPanel(new BorderLayout());
+            field.setBorder(BorderFactory.createEmptyBorder(1, 4, 1, 4));
+            field.setHorizontalAlignment(JTextField.LEFT);
+            editor.add(field, BorderLayout.CENTER);
+            spinner.setEditor(editor);
+
+            ((AbstractDocument) field.getDocument()).setDocumentFilter(new DocumentFilter() {
+                @Override
+                public void insertString(FilterBypass fb, int off, String str, AttributeSet a)
+                        throws BadLocationException {
+                    replace(fb, off, 0, str, a);
+                }
+
+                @Override
+                public void replace(FilterBypass fb, int off, int len, String text, AttributeSet a)
+                        throws BadLocationException {
+                    if (programmatic) {
+                        super.replace(fb, off, len, text, a);
+                        return;
+                    }
+                    if (text == null) text = "";
+                    Document d = fb.getDocument();
+                    String cur = d.getText(0, d.getLength());
+                    String next = cur.substring(0, off) + text + cur.substring(off + len);
+                    if (next.isEmpty() || next.equals("-") || next.matches("-?\\d{0,4}")) {
+                        super.replace(fb, off, len, text, a);
+                    } else {
+                        Toolkit.getDefaultToolkit().beep();
+                    }
+                }
+            });
+
+            commit = () -> {
+                if (programmatic) return;
+                String text = field.getText().trim();
+                int val;
+                if (text.isEmpty() || text.equals("-")) {
+                    val = Math.max(min, Math.min(max, 0));
+                } else {
+                    try {
+                        val = Integer.parseInt(text);
+                    } catch (NumberFormatException ex) {
+                        val = lastValid;
+                    }
+                }
+                if (val > max) val = max;
+                if (val < min) val = min;
+                userSet(val);
+            };
+
+            field.addActionListener(e -> commit.run());
+            field.addFocusListener(new FocusAdapter() {
+                @Override
+                public void focusLost(FocusEvent e) {
+                    commit.run();
+                }
+            });
+
+            slider.addChangeListener(e -> {
+                if (programmatic) return;
+                userSet(slider.getValue());
+            });
+
+            spinner.addChangeListener(e -> {
+                if (programmatic) return;
+                userSet(get());
+            });
+
+            set(initial);
+        }
+
+        void updateArrows() {
+            int v = get();
+            for (Component c : spinner.getComponents()) {
+                if (!(c instanceof JButton)) continue;
+                if ("Spinner.nextButton".equals(c.getName())) c.setEnabled(v < max);
+                else if ("Spinner.previousButton".equals(c.getName())) c.setEnabled(v > min);
+            }
+        }
+
+        int get() {
+            Object val = spinner.getValue();
+            return val instanceof Number ? ((Number) val).intValue() : lastValid;
+        }
+
+        void set(int v) {
+            v = Math.max(min, Math.min(max, v));
+            lastValid = v;
+            programmatic = true;
+            try {
+                slider.setValue(v);
+                field.setText(String.valueOf(v));
+                spinner.setValue(v);
+                updateArrows();
+            } finally {
+                programmatic = false;
+            }
+        }
+
+        void userSet(int v) {
+            int prev = lastValid;
+            set(v);
+            if (prev != lastValid) onChange.run();
+        }
+
+        void setRange(int newMin, int newMax, int newVal) {
+            this.min = newMin;
+            this.max = newMax;
+            programmatic = true;
+            try {
+                slider.setMinimum(newMin);
+                slider.setMaximum(newMax);
+                model.updateRange(newMin, newMax);
+                set(newVal);
+            } finally {
+                programmatic = false;
+            }
+        }
+    }
+
+    private BufferedImage originalImage;
+    private BufferedImage processedImage;
+
+    private final ImageCanvas originalCanvas = new ImageCanvas();
+    private final ImageCanvas processedCanvas = new ImageCanvas();
+
+    private Channel brightnessCh, contrastCh, gammaCh;
+    private JRadioButton rbBernsen, rbNiblack;
+    private Channel windowCh, paramCh;
+    private JPanel paramPanel;
+    private JButton btnInvert, btnLinearContrast, btnThreshold, btnResetAll;
+    private JTabbedPane tabs;
+
+    private TitledBorder paramBorder;
+
+    private boolean busy = false;
+    private Timer debounce;
+
+    public ImageProcessing() {
+        setTitle("Лабораторная работа 2 — Вариант 11");
+        setSize(1250, 750);
+        setResizable(false);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+        setLocationRelativeTo(null);
+
+        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        JButton btnOpen = new JButton("Открыть изображение");
+        JButton btnSave = new JButton("Сохранить результат");
+        btnResetAll = new JButton("Сброс параметров");
+        top.add(btnOpen);
+        top.add(btnSave);
+        top.add(btnResetAll);
+        add(top, BorderLayout.NORTH);
+
+        JPanel imageRow = new JPanel(new GridLayout(1, 2, 8, 8));
+        imageRow.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
+        imageRow.add(wrapWithTitle(originalCanvas, "Оригинал"));
+        imageRow.add(wrapWithTitle(processedCanvas, "Результат"));
+        add(imageRow, BorderLayout.CENTER);
+
+        tabs = new JTabbedPane();
+        tabs.setPreferredSize(new Dimension(340, 0));
+        tabs.addTab("Поэлементные", buildElementWiseTab());
+        tabs.addTab("Локальная пороговая", buildThresholdTab());
+        add(tabs, BorderLayout.EAST);
+
+        debounce = new Timer(60, e -> {
+            if (tabs.getSelectedIndex() == 1) {
+                applyThresholdAsync();
+            } else {
+                applyElementWiseAsync();
+            }
+        });
+        debounce.setRepeats(false);
+
+        tabs.addChangeListener(e -> {
+            if (tabs.getSelectedIndex() == 1) {
+                applyThresholdAsync();
+            } else {
+                applyElementWiseAsync();
+            }
+        });
+
+        btnOpen.addActionListener(e -> openImage());
+        btnSave.addActionListener(e -> saveImage());
+        btnResetAll.addActionListener(e -> resetAll());
+        btnInvert.addActionListener(e -> applyInvert());
+        btnLinearContrast.addActionListener(e -> applyLinearContrastAsync());
+        btnThreshold.addActionListener(e -> applyThresholdAsync());
+
+        originalImage = generateTestImage();
+        processedImage = deepCopy(originalImage);
+        updateImageLabels();
+    }
+
+    private JPanel wrapWithTitle(JComponent content, String title) {
+        JPanel p = new JPanel(new BorderLayout(0, 3));
+        JLabel t = new JLabel(title, SwingConstants.CENTER);
+        t.setFont(t.getFont().deriveFont(Font.BOLD, 13f));
+        p.add(t, BorderLayout.NORTH);
+        p.add(content, BorderLayout.CENTER);
+        return p;
+    }
+
+    private JPanel buildElementWiseTab() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
+
+        brightnessCh = new Channel(0, 255, 0);
+        contrastCh   = new Channel(0, 300, 100);
+        gammaCh      = new Channel(10, 300, 100);
+
+        ChangeListener live = e -> { if (!busy) debounce.restart(); };
+        brightnessCh.slider.addChangeListener(live);
+        contrastCh.slider.addChangeListener(live);
+        gammaCh.slider.addChangeListener(live);
+        brightnessCh.onChange = () -> { if (!busy) debounce.restart(); };
+        contrastCh.onChange   = () -> { if (!busy) debounce.restart(); };
+        gammaCh.onChange      = () -> { if (!busy) debounce.restart(); };
+
+        panel.add(section("Яркость (0 - 255)", brightnessCh.slider, brightnessCh.spinner));
+        panel.add(section("Контраст (0 - 300 %)", contrastCh.slider, contrastCh.spinner));
+        panel.add(section("Гамма (10 - 300 %)", gammaCh.slider, gammaCh.spinner));
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        btnInvert = new JButton("Негатив");
+        btnLinearContrast = new JButton("Лин. контрастирование");
+        buttons.add(btnInvert);
+        buttons.add(btnLinearContrast);
+        panel.add(buttons);
+
+        return panel;
+    }
+
+    private JPanel buildThresholdTab() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JPanel methodBox = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        methodBox.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Метод",
+                TitledBorder.LEFT, TitledBorder.TOP,
+                new Font("SansSerif", Font.PLAIN, 11)));
+        rbBernsen = new JRadioButton("Бернсен", true);
+        rbNiblack = new JRadioButton("Ниблацк");
+        rbBernsen.setFont(rbBernsen.getFont().deriveFont(11f));
+        rbNiblack.setFont(rbNiblack.getFont().deriveFont(11f));
+        ButtonGroup g = new ButtonGroup();
+        g.add(rbBernsen);
+        g.add(rbNiblack);
+        methodBox.add(rbBernsen);
+        methodBox.add(rbNiblack);
+        methodBox.setMaximumSize(new Dimension(Integer.MAX_VALUE, 48));
+        panel.add(methodBox);
+
+        windowCh = new Channel(3, 31, 15);
+        paramCh  = new Channel(0, 255, 15);
+
+        paramPanel = new JPanel(new BorderLayout(2, 0));
+        paramBorder = BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Порог контраста ε (0 - 255)",
+                TitledBorder.LEFT, TitledBorder.TOP,
+                new Font("SansSerif", Font.PLAIN, 10));
+        paramPanel.setBorder(paramBorder);
+        paramPanel.add(paramCh.slider, BorderLayout.CENTER);
+        paramCh.spinner.setPreferredSize(new Dimension(70, 22));
+        paramPanel.add(paramCh.spinner, BorderLayout.EAST);
+        paramPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
+
+        rbBernsen.addActionListener(e -> {
+            paramBorder.setTitle("Порог контраста ε (0 - 255)");
+            paramPanel.repaint();
+            paramCh.setRange(0, 255, 15);
+            applyThresholdAsync();
+        });
+        rbNiblack.addActionListener(e -> {
+            paramBorder.setTitle("Коэффициент k (-100..100 -> -1..1)");
+            paramPanel.repaint();
+            paramCh.setRange(-100, 100, -20);
+            applyThresholdAsync();
+        });
+
+        ChangeListener liveThreshold = e -> { if (!busy) debounce.restart(); };
+        windowCh.slider.addChangeListener(liveThreshold);
+        paramCh.slider.addChangeListener(liveThreshold);
+        windowCh.onChange = () -> { if (!busy) debounce.restart(); };
+        paramCh.onChange  = () -> { if (!busy) debounce.restart(); };
+
+        panel.add(compactSection("Окно (3 - 31, нечёт.)", windowCh.slider, windowCh.spinner));
+        panel.add(paramPanel);
+
+        btnThreshold = new JButton("Применить");
+        btnThreshold.setFont(btnThreshold.getFont().deriveFont(11f));
+        JPanel b = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        b.add(btnThreshold);
+        b.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+        panel.add(b);
+
+        return panel;
+    }
+
+    private JPanel compactSection(String title, JSlider slider, JSpinner spinner) {
+        JPanel p = new JPanel(new BorderLayout(2, 0));
+        p.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), title,
+                TitledBorder.LEFT, TitledBorder.TOP,
+                new Font("SansSerif", Font.PLAIN, 10)));
+        p.add(slider, BorderLayout.CENTER);
+        spinner.setPreferredSize(new Dimension(70, 22));
+        p.add(spinner, BorderLayout.EAST);
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
+        return p;
+    }
+
+    private JPanel section(String title, JSlider slider, JSpinner spinner) {
+        JPanel p = new JPanel(new BorderLayout(4, 4));
+        p.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), title,
+                TitledBorder.LEFT, TitledBorder.TOP,
+                new Font("SansSerif", Font.PLAIN, 12)));
+        p.add(slider, BorderLayout.CENTER);
+        spinner.setPreferredSize(new Dimension(80, 26));
+        p.add(spinner, BorderLayout.EAST);
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 90));
+        return p;
+    }
+
+    private void openImage() {
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        try {
+            BufferedImage img = ImageIO.read(chooser.getSelectedFile());
+            if (img == null) {
+                JOptionPane.showMessageDialog(this, "Не удалось прочитать файл");
+                return;
+            }
+            originalImage = toGray(img);
+            processedImage = deepCopy(originalImage);
+            resetAllParamsOnly();
+            updateImageLabels();
+            if (tabs.getSelectedIndex() == 1) {
+                applyThresholdAsync();
+            }
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Ошибка чтения файла!");
+        }
+    }
+
+    private void saveImage() {
+        if (processedImage == null) return;
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        try {
+            ImageIO.write(processedImage, "png", chooser.getSelectedFile());
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Ошибка сохранения!");
+        }
+    }
+
+    private void resetAllParamsOnly() {
+        brightnessCh.set(0);
+        contrastCh.set(100);
+        gammaCh.set(100);
+        windowCh.set(15);
+        if (rbBernsen.isSelected()) {
+            paramBorder.setTitle("Порог контраста ε (0 - 255)");
+            paramCh.setRange(0, 255, 15);
+        } else {
+            paramBorder.setTitle("Коэффициент k (-100..100 -> -1..1)");
+            paramCh.setRange(-100, 100, -20);
+        }
+        if (paramPanel != null) {
+            paramPanel.repaint();
+        }
+    }
+
+    private void resetAll() {
+        resetAllParamsOnly();
+        if (originalImage != null) {
+            processedImage = deepCopy(originalImage);
+            updateImageLabels();
+        }
+    }
+
+    private void applyInvert() {
+        if (processedImage == null || busy) return;
+        BufferedImage src = processedImage;
+        int w = src.getWidth(), h = src.getHeight();
+        BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+        byte[] srcData = ((DataBufferByte) src.getRaster().getDataBuffer()).getData();
+        byte[] dstData = ((DataBufferByte) dst.getRaster().getDataBuffer()).getData();
+        for (int i = 0; i < srcData.length; i++) {
+            dstData[i] = (byte) (255 - (srcData[i] & 0xFF));
+        }
+        processedImage = dst;
+        updateImageLabels();
+    }
+
+    private void applyElementWiseAsync() {
+        if (originalImage == null || busy) return;
+        busy = true;
+        final BufferedImage src = originalImage;
+        final int bright = brightnessCh.get();
+        final double contrast = contrastCh.get() / 100.0;
+        final double gamma = gammaCh.get() / 100.0;
+
+        new SwingWorker<BufferedImage, Void>() {
+            @Override
+            protected BufferedImage doInBackground() {
+                int w = src.getWidth(), h = src.getHeight();
+                BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+                int[] row = new int[w];
+                for (int y = 0; y < h; y++) {
+                    src.getRGB(0, y, w, 1, row, 0, w);
+                    for (int x = 0; x < w; x++) {
+                        int g = (row[x] >> 16) & 0xFF;
+                        double f = g * contrast + bright;
+                        if (f < 0) f = 0; else if (f > 255) f = 255;
+                        if (Math.abs(gamma - 1.0) > 1e-6)
+                            f = 255.0 * Math.pow(f / 255.0, gamma);
+                        int v = (int) Math.max(0, Math.min(255, f));
+                        row[x] = (255 << 24) | (v << 16) | (v << 8) | v;
+                    }
+                    dst.setRGB(0, y, w, 1, row, 0, w);
+                }
+                return dst;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    processedImage = get();
+                    updateImageLabels();
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                } finally {
+                    busy = false;
+                }
+            }
+        }.execute();
+    }
+
+    private void applyLinearContrastAsync() {
+        if (processedImage == null || busy) return;
+        busy = true;
+        final BufferedImage src = processedImage;
+        new SwingWorker<BufferedImage, Void>() {
+            @Override
+            protected BufferedImage doInBackground() {
+                int w = src.getWidth(), h = src.getHeight();
+                byte[] srcData = ((DataBufferByte) src.getRaster().getDataBuffer()).getData();
+                int min = 255, max = 0;
+                for (int i = 0; i < srcData.length; i++) {
+                    int g = srcData[i] & 0xFF;
+                    if (g < min) min = g;
+                    if (g > max) max = g;
+                }
+                BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+                byte[] dstData = ((DataBufferByte) dst.getRaster().getDataBuffer()).getData();
+                if (max == min) {
+                    System.arraycopy(srcData, 0, dstData, 0, srcData.length);
+                    return dst;
+                }
+                double range = max - min;
+                for (int i = 0; i < srcData.length; i++) {
+                    int g = srcData[i] & 0xFF;
+                    int v = (int) Math.round((g - min) * 255.0 / range);
+                    if (v < 0) v = 0; else if (v > 255) v = 255;
+                    dstData[i] = (byte) v;
+                }
+                return dst;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    processedImage = get();
+                    updateImageLabels();
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                } finally {
+                    busy = false;
+                }
+            }
+        }.execute();
+    }
+
+    private void applyThresholdAsync() {
+        if (originalImage == null || busy) return;
+        busy = true;
+        final BufferedImage src = originalImage;
+        final int r = makeOdd(windowCh.get());
+        final boolean bernsen = rbBernsen.isSelected();
+        final int raw = paramCh.get();
+
+        new SwingWorker<BufferedImage, Void>() {
+            @Override
+            protected BufferedImage doInBackground() {
+                return bernsen ? bernsen(src, r, raw) : niblack(src, r, raw / 100.0);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    processedImage = get();
+                    updateImageLabels();
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                } finally {
+                    busy = false;
+                }
+            }
+        }.execute();
+    }
+
+    private static int makeOdd(int v) {
+        if (v % 2 == 0) v++;
+        return Math.max(3, Math.min(31, v));
+    }
+
+    private static BufferedImage bernsen(BufferedImage src, int r, double eps) {
+        int w = src.getWidth(), h = src.getHeight();
+        int off = r / 2;
+        BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+
+        byte[] srcData = ((DataBufferByte) src.getRaster().getDataBuffer()).getData();
+        byte[] dstData = ((DataBufferByte) dst.getRaster().getDataBuffer()).getData();
+
+        for (int y = 0; y < h; y++) {
+            int yMin = Math.max(0, y - off);
+            int yMax = Math.min(h - 1, y + off);
+
+            for (int x = 0; x < w; x++) {
+                int xMin = Math.max(0, x - off);
+                int xMax = Math.min(w - 1, x + off);
+
+                int min = 255, max = 0;
+                for (int yy = yMin; yy <= yMax; yy++) {
+                    int rowOff = yy * w;
+                    for (int xx = xMin; xx <= xMax; xx++) {
+                        int val = srcData[rowOff + xx] & 0xFF;
+                        if (val < min) min = val;
+                        if (val > max) max = val;
+                    }
+                }
+
+                int g = srcData[y * w + x] & 0xFF;
+                int contrast = max - min;
+                int mid = (max + min) / 2;
+                int v;
+
+                if (contrast < eps) {
+                    v = (mid >= 128) ? 255 : 0;
+                } else {
+                    v = (g >= mid) ? 255 : 0;
+                }
+
+                dstData[y * w + x] = (byte) v;
+            }
+        }
+        return dst;
+    }
+
+    private static BufferedImage niblack(BufferedImage src, int r, double k) {
+        int w = src.getWidth(), h = src.getHeight();
+        int off = r / 2;
+        BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+
+        byte[] srcData = ((DataBufferByte) src.getRaster().getDataBuffer()).getData();
+        byte[] dstData = ((DataBufferByte) dst.getRaster().getDataBuffer()).getData();
+
+        double[][] sum = new double[h + 1][w + 1];
+        double[][] sumSq = new double[h + 1][w + 1];
+
+        for (int y = 0; y < h; y++) {
+            double rowSum = 0;
+            double rowSumSq = 0;
+            int rowOff = y * w;
+            for (int x = 0; x < w; x++) {
+                double val = srcData[rowOff + x] & 0xFF;
+                rowSum += val;
+                rowSumSq += val * val;
+                sum[y + 1][x + 1] = sum[y][x + 1] + rowSum;
+                sumSq[y + 1][x + 1] = sumSq[y][x + 1] + rowSumSq;
+            }
+        }
+
+        for (int y = 0; y < h; y++) {
+            int y1 = Math.max(0, y - off);
+            int y2 = Math.min(h, y + off + 1);
+
+            for (int x = 0; x < w; x++) {
+                int x1 = Math.max(0, x - off);
+                int x2 = Math.min(w, x + off + 1);
+
+                int count = (x2 - x1) * (y2 - y1);
+                double total = sum[y2][x2] - sum[y1][x2] - sum[y2][x1] + sum[y1][x1];
+                double totalSq = sumSq[y2][x2] - sumSq[y1][x2] - sumSq[y2][x1] + sumSq[y1][x1];
+
+                double mean = total / count;
+                double variance = (totalSq / count) - (mean * mean);
+                double std = Math.sqrt(Math.max(0.0, variance));
+
+                double t = mean + k * std;
+                int g = srcData[y * w + x] & 0xFF;
+
+                dstData[y * w + x] = (byte) ((g >= t) ? 255 : 0);
+            }
+        }
+        return dst;
+    }
+
+    private static BufferedImage toGray(BufferedImage img) {
+        BufferedImage g = new BufferedImage(img.getWidth(), img.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
+        Graphics2D g2 = g.createGraphics();
+        g2.drawImage(img, 0, 0, null);
+        g2.dispose();
+        return g;
+    }
+
+    private static BufferedImage deepCopy(BufferedImage src) {
+        BufferedImage b = new BufferedImage(src.getWidth(), src.getHeight(), src.getType());
+        Graphics g = b.getGraphics();
+        g.drawImage(src, 0, 0, null);
+        g.dispose();
+        return b;
+    }
+
+    private static BufferedImage generateTestImage() {
+        int w = 600, h = 400;
+        BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY);
+        Graphics2D g = img.createGraphics();
+        g.setPaint(new GradientPaint(0, 0, new Color(40, 40, 40), w, h, new Color(220, 220, 220)));
+        g.fillRect(0, 0, w, h);
+        g.setColor(new Color(200, 200, 200));
+        g.fillOval(60, 60, 160, 160);
+        g.setColor(new Color(60, 60, 60));
+        g.fillRect(320, 180, 180, 150);
+        g.dispose();
+        for (int i = 0; i < 4000; i++) {
+            int x = (int) (Math.random() * w);
+            int y = (int) (Math.random() * h);
+            img.setRGB(x, y, Math.random() > 0.5 ? 0xFFFFFFFF : 0xFF000000);
+        }
+        return img;
+    }
+
+    private void updateImageLabels() {
+        originalCanvas.setImage(originalImage);
+        processedCanvas.setImage(processedImage);
+    }
+
+    static class ImageCanvas extends JPanel {
+        private static final Color BG = new Color(0xD9, 0xD9, 0xD9);
+        private BufferedImage image;
+
+        ImageCanvas() {
+            setBackground(BG);
+            setOpaque(true);
+        }
+
+        void setImage(BufferedImage img) {
+            this.image = img;
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            g.setColor(BG);
+            g.fillRect(0, 0, getWidth(), getHeight());
+            if (image == null) return;
+
+            int iw = image.getWidth(), ih = image.getHeight();
+            double scale = Math.min((double) getWidth() / iw, (double) getHeight() / ih);
+            if (scale > 1.0) scale = 1.0;
+            int nw = (int) Math.max(1, Math.round(iw * scale));
+            int nh = (int) Math.max(1, Math.round(ih * scale));
+            int x = (getWidth() - nw) / 2;
+            int y = (getHeight() - nh) / 2;
+
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g2.drawImage(image, x, y, nw, nh, null);
+            g2.dispose();
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new ImageProcessing().setVisible(true));
+    }
+}
