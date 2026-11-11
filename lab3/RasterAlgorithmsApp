@@ -1,0 +1,541 @@
+import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
+import java.awt.*;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.ArrayList;
+import java.util.List;
+
+public class RasterAlgorithmsApp extends JFrame {
+
+    private static final int MIN_COORD = -50;
+    private static final int MAX_COORD = 50;
+    private static final int MIN_RADIUS = 1;
+    private static final int MAX_RADIUS = 50;
+
+    private final JComboBox<String> algorithmSelector;
+    private final JTextField x1Field;
+    private final JTextField y1Field;
+    private final JTextField x2Field;
+    private final JTextField y2Field;
+    private final JLabel radiusLabel;
+    private final JLabel x2Label;
+    private final JLabel y2Label;
+    private final JLabel timeLabel;
+    private final DefaultTableModel tableModel;
+    private final GridPanel gridPanel;
+
+    private final List<Point> rasterPoints = new ArrayList<>();
+    private final List<Object[]> calculationLog = new ArrayList<>();
+    private int startX = 0, startY = 0, endX = 23, endY = 5, radius = 5;
+    private boolean isCircle = false;
+    private boolean hasExecuted = false;
+
+    public RasterAlgorithmsApp() {
+        super("Базовые растровые алгоритмы");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setSize(1150, 750);
+        setResizable(false);
+        setLocationRelativeTo(null);
+
+        JPanel mainTopPanel = new JPanel(new GridLayout(2, 1));
+        JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 5));
+        JPanel infoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 3));
+
+        String[] algorithms = {
+                "Пошаговый алгоритм",
+                "Алгоритм ЦДА",
+                "Алгоритм Брезенхема (отрезок)",
+                "Алгоритм Брезенхема (окружность)"
+        };
+        algorithmSelector = new JComboBox<>(algorithms);
+
+        x1Field = new JTextField("0", 3);
+        y1Field = new JTextField("0", 3);
+        x2Field = new JTextField("23", 3);
+        y2Field = new JTextField("5", 3);
+
+        FocusAdapter emptyToZeroAdapter = new FocusAdapter() {
+            @Override
+            public void focusLost(FocusEvent e) {
+                JTextField field = (JTextField) e.getSource();
+                if (field.getText().trim().isEmpty()) {
+                    field.setText("0");
+                }
+            }
+        };
+
+        x1Field.addFocusListener(emptyToZeroAdapter);
+        y1Field.addFocusListener(emptyToZeroAdapter);
+        x2Field.addFocusListener(emptyToZeroAdapter);
+        y2Field.addFocusListener(emptyToZeroAdapter);
+
+        x2Label = new JLabel("X2:");
+        y2Label = new JLabel("Y2:");
+        radiusLabel = new JLabel("R:");
+        radiusLabel.setVisible(false);
+
+        JButton executeButton = new JButton("Выполнить");
+        timeLabel = new JLabel("");
+
+        JLabel rangeLimitLabel = new JLabel("Ограничение диапазона: X, Y ∈ [-50; 50]; R ∈ [1; 50].");
+        rangeLimitLabel.setForeground(new Color(180, 0, 0));
+        rangeLimitLabel.setFont(new Font("SansSerif", Font.BOLD, 12));
+
+        controlPanel.add(new JLabel("Алгоритм:"));
+        controlPanel.add(algorithmSelector);
+        controlPanel.add(new JLabel("X1/X0:"));
+        controlPanel.add(x1Field);
+        controlPanel.add(new JLabel("Y1/Y0:"));
+        controlPanel.add(y1Field);
+        controlPanel.add(x2Label);
+        controlPanel.add(x2Field);
+        controlPanel.add(y2Label);
+        controlPanel.add(y2Field);
+        controlPanel.add(radiusLabel);
+        controlPanel.add(executeButton);
+        controlPanel.add(timeLabel);
+
+        infoPanel.add(rangeLimitLabel);
+
+        mainTopPanel.add(controlPanel);
+        mainTopPanel.add(infoPanel);
+
+        gridPanel = new GridPanel();
+
+        String[] columns = {"Шаг", "X", "Y", "Вычисления / Ошибка"};
+        tableModel = new DefaultTableModel(columns, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+        };
+        JTable table = new JTable(tableModel);
+        JScrollPane tableScroll = new JScrollPane(table);
+        tableScroll.setPreferredSize(new Dimension(380, 0));
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, gridPanel, tableScroll);
+        splitPane.setResizeWeight(0.66);
+
+        add(mainTopPanel, BorderLayout.NORTH);
+        add(splitPane, BorderLayout.CENTER);
+
+        algorithmSelector.addActionListener(e -> {
+            int idx = algorithmSelector.getSelectedIndex();
+            if (idx == 3) {
+                x2Label.setVisible(false);
+                x2Field.setVisible(false);
+                y2Label.setVisible(false);
+                radiusLabel.setVisible(true);
+                y2Field.setText(String.valueOf(radius));
+            } else {
+                x2Label.setVisible(true);
+                x2Field.setVisible(true);
+                y2Label.setVisible(true);
+                radiusLabel.setVisible(false);
+            }
+            controlPanel.revalidate();
+            controlPanel.repaint();
+        });
+
+        executeButton.addActionListener(e -> runSelectedAlgorithm());
+    }
+
+    private int clamp(int val, int min, int max) {
+        return Math.max(min, Math.min(max, val));
+    }
+
+    private void runSelectedAlgorithm() {
+        int parsedX1, parsedY1, parsedX2 = 0, parsedY2 = 0, parsedR = 0;
+        int idx = algorithmSelector.getSelectedIndex();
+
+        try {
+            int rawX1 = x1Field.getText().trim().isEmpty() ? 0 : Integer.parseInt(x1Field.getText().trim());
+            int rawY1 = y1Field.getText().trim().isEmpty() ? 0 : Integer.parseInt(y1Field.getText().trim());
+
+            parsedX1 = clamp(rawX1, MIN_COORD, MAX_COORD);
+            parsedY1 = clamp(rawY1, MIN_COORD, MAX_COORD);
+            x1Field.setText(String.valueOf(parsedX1));
+            y1Field.setText(String.valueOf(parsedY1));
+
+            if (idx == 3) {
+                int rawR = y2Field.getText().trim().isEmpty() ? MIN_RADIUS : Integer.parseInt(y2Field.getText().trim());
+                parsedR = clamp(rawR, MIN_RADIUS, MAX_RADIUS);
+                y2Field.setText(String.valueOf(parsedR));
+            } else {
+                int rawX2 = x2Field.getText().trim().isEmpty() ? 0 : Integer.parseInt(x2Field.getText().trim());
+                int rawY2 = y2Field.getText().trim().isEmpty() ? 0 : Integer.parseInt(y2Field.getText().trim());
+
+                parsedX2 = clamp(rawX2, MIN_COORD, MAX_COORD);
+                parsedY2 = clamp(rawY2, MIN_COORD, MAX_COORD);
+                x2Field.setText(String.valueOf(parsedX2));
+                y2Field.setText(String.valueOf(parsedY2));
+            }
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Введите корректные целые числа.",
+                    "Ошибка ввода", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        startX = parsedX1;
+        startY = parsedY1;
+        if (idx == 3) {
+            isCircle = true;
+            radius = parsedR;
+        } else {
+            isCircle = false;
+            endX = parsedX2;
+            endY = parsedY2;
+        }
+
+        hasExecuted = true;
+        rasterPoints.clear();
+        calculationLog.clear();
+        tableModel.setRowCount(0);
+
+        long startTime = 0;
+        long endTime = 0;
+
+        if (idx == 3) {
+            startTime = System.nanoTime();
+            runBresenhamCircle(startX, startY, radius);
+            endTime = System.nanoTime();
+        } else if (idx == 0) {
+            startTime = System.nanoTime();
+            runStepByStep(startX, startY, endX, endY);
+            endTime = System.nanoTime();
+        } else if (idx == 1) {
+            startTime = System.nanoTime();
+            runDDA(startX, startY, endX, endY);
+            endTime = System.nanoTime();
+        } else if (idx == 2) {
+            startTime = System.nanoTime();
+            runBresenhamLine(startX, startY, endX, endY);
+            endTime = System.nanoTime();
+        }
+
+        long duration = endTime - startTime;
+        double durationMs = duration / 1_000_000.0;
+        timeLabel.setText(String.format("Время: %.4f мс", durationMs));
+
+        for (Object[] row : calculationLog) {
+            tableModel.addRow(row);
+        }
+
+        gridPanel.fitScale();
+        gridPanel.repaint();
+    }
+
+    private void runStepByStep(int x1, int y1, int x2, int y2) {
+        if (x1 == x2 && y1 == y2) {
+            rasterPoints.add(new Point(x1, y1));
+            calculationLog.add(new Object[]{1, x1, y1, "Точка"});
+            return;
+        }
+
+        int dx = x2 - x1;
+        int dy = y2 - y1;
+        int step = 1;
+
+        if (Math.abs(dx) >= Math.abs(dy)) {
+            double k = (double) dy / dx;
+            double b = y1 - k * x1;
+            int inc = (dx > 0) ? 1 : -1;
+            for (int x = x1; (inc > 0) ? (x <= x2) : (x >= x2); x += inc) {
+                double exactY = k * x + b;
+                int y = (int) Math.round(exactY);
+                rasterPoints.add(new Point(x, y));
+                calculationLog.add(new Object[]{step++, x, y, String.format("k=%.4f, y=%.4f", k, exactY)});
+            }
+        } else {
+            double kInv = (double) dx / dy;
+            double b = x1 - kInv * y1;
+            int inc = (dy > 0) ? 1 : -1;
+            for (int y = y1; (inc > 0) ? (y <= y2) : (y >= y2); y += inc) {
+                double exactX = kInv * y + b;
+                int x = (int) Math.round(exactX);
+                rasterPoints.add(new Point(x, y));
+                calculationLog.add(new Object[]{step++, x, y, String.format("1/k=%.4f, x=%.4f", kInv, exactX)});
+            }
+        }
+    }
+
+    private void runDDA(int x1, int y1, int x2, int y2) {
+        int dx = x2 - x1;
+        int dy = y2 - y1;
+        int length = Math.max(Math.abs(dx), Math.abs(dy));
+
+        if (length == 0) {
+            rasterPoints.add(new Point(x1, y1));
+            calculationLog.add(new Object[]{1, x1, y1, "Точка"});
+            return;
+        }
+
+        double rawStepX = (double) dx / length;
+        double rawStepY = (double) dy / length;
+
+        double stepX = Math.round(rawStepX * 100.0) / 100.0;
+        double stepY = Math.round(rawStepY * 100.0) / 100.0;
+
+        double currentX = x1;
+        double currentY = y1;
+
+        for (int i = 0; i <= length; i++) {
+            int px = (int) Math.round(currentX);
+            int py = (int) Math.round(currentY);
+            rasterPoints.add(new Point(px, py));
+            calculationLog.add(new Object[]{i + 1, px, py, String.format("x=%.2f, y=%.2f (шаг: %.2f)", currentX, currentY, (Math.abs(dx) >= Math.abs(dy) ? stepY : stepX))});
+            currentX = Math.round((currentX + stepX) * 100.0) / 100.0;
+            currentY = Math.round((currentY + stepY) * 100.0) / 100.0;
+        }
+    }
+
+    private void runBresenhamLine(int x1, int y1, int x2, int y2) {
+        int x = x1;
+        int y = y1;
+        int dx = Math.abs(x2 - x1);
+        int dy = Math.abs(y2 - y1);
+        int sx = (x1 < x2) ? 1 : -1;
+        int sy = (y1 < y2) ? 1 : -1;
+        int err = dx - dy;
+        int step = 1;
+
+        while (true) {
+            rasterPoints.add(new Point(x, y));
+            calculationLog.add(new Object[]{step++, x, y, String.format("err=%d, dx=%d, dy=%d", err, dx, dy)});
+
+            if (x == x2 && y == y2) {
+                break;
+            }
+
+            int e2 = 2 * err;
+            if (e2 > -dy) {
+                err -= dy;
+                x += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    private void runBresenhamCircle(int xc, int yc, int r) {
+        int x = 0;
+        int y = r;
+        int d = 3 - 2 * r;
+        int step = 1;
+
+        while (x <= y) {
+            addOptimizedCirclePoints(xc, yc, x, y);
+            calculationLog.add(new Object[]{step++, x, y, String.format("d=%d (симметрия 8 точек)", d)});
+
+            if (d < 0) {
+                d += 4 * x + 6;
+            } else {
+                d += 4 * (x - y) + 10;
+                y--;
+            }
+            x++;
+        }
+    }
+
+    private void addOptimizedCirclePoints(int xc, int yc, int x, int y) {
+        rasterPoints.add(new Point(xc + x, yc + y));
+        if (x != 0) rasterPoints.add(new Point(xc - x, yc + y));
+        if (y != 0) rasterPoints.add(new Point(xc + x, yc - y));
+        if (x != 0 && y != 0) rasterPoints.add(new Point(xc - x, yc - y));
+        if (x != y) {
+            rasterPoints.add(new Point(xc + y, yc + x));
+            if (y != 0) rasterPoints.add(new Point(xc - y, yc + x));
+            if (x != 0) rasterPoints.add(new Point(xc + y, yc - x));
+            if (x != 0 && y != 0) rasterPoints.add(new Point(xc - y, yc - x));
+        }
+    }
+
+    private class GridPanel extends JPanel {
+        private int scale = 25;
+        private int panX = 0;
+        private int panY = 0;
+        private Point mousePrev = null;
+
+        public GridPanel() {
+            setBackground(Color.WHITE);
+
+            MouseAdapter ma = new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    mousePrev = e.getPoint();
+                }
+
+                @Override
+                public void mouseDragged(MouseEvent e) {
+                    if (mousePrev != null) {
+                        panX += e.getX() - mousePrev.x;
+                        panY += e.getY() - mousePrev.y;
+                        mousePrev = e.getPoint();
+                        repaint();
+                    }
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent e) {
+                    mousePrev = null;
+                }
+            };
+
+            addMouseListener(ma);
+            addMouseMotionListener(ma);
+        }
+
+        public void fitScale() {
+            int w = getWidth() > 0 ? getWidth() : 650;
+            int h = getHeight() > 0 ? getHeight() : 650;
+
+            if (!hasExecuted) {
+                scale = 25;
+                panX = 0;
+                panY = 0;
+                return;
+            }
+
+            int minX, maxX, minY, maxY;
+
+            if (isCircle) {
+                minX = Math.min(0, startX - radius) - 2;
+                maxX = Math.max(0, startX + radius) + 2;
+                minY = Math.min(0, startY - radius) - 2;
+                maxY = Math.max(0, startY + radius) + 2;
+            } else {
+                minX = Math.min(0, Math.min(startX, endX)) - 2;
+                maxX = Math.max(0, Math.max(startX, endX)) + 2;
+                minY = Math.min(0, Math.min(startY, endY)) - 2;
+                maxY = Math.max(0, Math.max(startY, endY)) + 2;
+            }
+
+            int spanX = Math.max(1, maxX - minX + 1);
+            int spanY = Math.max(1, maxY - minY + 1);
+
+            int calculatedScale = Math.min(w / spanX, h / spanY);
+            scale = Math.max(6, Math.min(40, calculatedScale));
+
+            double centerX = (minX + maxX) / 2.0;
+            double centerY = (minY + maxY) / 2.0;
+
+            panX = -(int) (centerX * scale);
+            panY = (int) (centerY * scale);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int width = getWidth();
+            int height = getHeight();
+
+            int originX = width / 2 + panX;
+            int originY = height / 2 + panY;
+
+            g2.setColor(new Color(230, 230, 230));
+            int startGridX = originX % scale;
+            if (startGridX < 0) startGridX += scale;
+            for (int x = startGridX; x < width; x += scale) {
+                g2.drawLine(x, 0, x, height);
+            }
+
+            int startGridY = originY % scale;
+            if (startGridY < 0) startGridY += scale;
+            for (int y = startGridY; y < height; y += scale) {
+                g2.drawLine(0, y, width, y);
+            }
+
+            if (hasExecuted) {
+                g2.setColor(new Color(100, 149, 237, 180));
+                for (Point p : rasterPoints) {
+                    int px = originX + p.x * scale;
+                    int py = originY - (p.y + 1) * scale;
+                    if (px + scale >= 0 && px <= width && py + scale >= 0 && py <= height) {
+                        g2.fillRect(px, py, scale, scale);
+                        g2.setColor(new Color(70, 130, 180));
+                        g2.drawRect(px, py, scale, scale);
+                        g2.setColor(new Color(100, 149, 237, 180));
+                    }
+                }
+
+                g2.setColor(new Color(220, 20, 60));
+                g2.setStroke(new BasicStroke(1.5f));
+                if (isCircle) {
+                    int cx = originX + startX * scale + scale / 2;
+                    int cy = originY - startY * scale - scale / 2;
+                    int rPx = radius * scale;
+                    g2.drawOval(cx - rPx, cy - rPx, 2 * rPx, 2 * rPx);
+                } else {
+                    int lx1 = originX + startX * scale + scale / 2;
+                    int ly1 = originY - startY * scale - scale / 2;
+                    int lx2 = originX + endX * scale + scale / 2;
+                    int ly2 = originY - endY * scale - scale / 2;
+                    g2.drawLine(lx1, ly1, lx2, ly2);
+                }
+            }
+
+            g2.setColor(Color.BLACK);
+            g2.setStroke(new BasicStroke(2.0f));
+            g2.drawLine(0, originY, width, originY);
+            g2.drawLine(originX, 0, originX, height);
+
+            g2.fillPolygon(new int[]{width - 10, width, width - 10}, new int[]{originY - 5, originY, originY + 5}, 3);
+            g2.fillPolygon(new int[]{originX - 5, originX, originX + 5}, new int[]{10, 0, 10}, 3);
+
+            g2.setFont(new Font("SansSerif", Font.BOLD, 12));
+            g2.drawString("X", width - 15, originY - 8);
+            g2.drawString("Y", originX - 18, 15);
+            g2.drawString("0", originX + 3, originY + 14);
+
+            g2.setFont(new Font("SansSerif", Font.PLAIN, 10));
+            int stepUnit = (scale < 12) ? 5 : (scale < 20 ? 2 : 1);
+
+            for (int x = originX + scale; x < width; x += scale) {
+                int val = (x - originX) / scale;
+                if (val % stepUnit == 0) {
+                    g2.drawLine(x, originY - 3, x, originY + 3);
+                    g2.drawString(String.valueOf(val), x - 4, originY + 14);
+                }
+            }
+            for (int x = originX - scale; x > 0; x -= scale) {
+                int val = (x - originX) / scale;
+                if (val % stepUnit == 0) {
+                    g2.drawLine(x, originY - 3, x, originY + 3);
+                    g2.drawString(String.valueOf(val), x - 8, originY + 14);
+                }
+            }
+            for (int y = originY - scale; y > 0; y -= scale) {
+                int val = (originY - y) / scale;
+                if (val % stepUnit == 0) {
+                    g2.drawLine(originX - 3, y, originX + 3, y);
+                    g2.drawString(String.valueOf(val), originX + 5, y + 4);
+                }
+            }
+            for (int y = originY + scale; y < height; y += scale) {
+                int val = (originY - y) / scale;
+                if (val % stepUnit == 0) {
+                    g2.drawLine(originX - 3, y, originX + 3, y);
+                    g2.drawString(String.valueOf(val), originX + 5, y + 4);
+                }
+            }
+
+            g2.dispose();
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            RasterAlgorithmsApp app = new RasterAlgorithmsApp();
+            app.setVisible(true);
+        });
+    }
+}
