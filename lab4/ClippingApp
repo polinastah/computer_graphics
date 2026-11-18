@@ -1,0 +1,778 @@
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import java.awt.*;
+import java.awt.geom.*;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.List;
+
+public class ClippingApp extends JFrame {
+
+    private static class Segment {
+        double x1, y1, x2, y2;
+
+        Segment(double x1, double y1, double x2, double y2) {
+            this.x1 = x1;
+            this.y1 = y1;
+            this.x2 = x2;
+            this.y2 = y2;
+        }
+    }
+
+    private static class LiangBarskyResult {
+        Segment original;
+        Segment clipped;
+        double tIn;
+        double tOut;
+        boolean visible;
+
+        LiangBarskyResult(Segment original, Segment clipped, double tIn, double tOut, boolean visible) {
+            this.original = original;
+            this.clipped = clipped;
+            this.tIn = tIn;
+            this.tOut = tOut;
+            this.visible = visible;
+        }
+    }
+
+    private static final int MODE_LIANG_BARSKY = 0;
+    private static final int MODE_SUTHERLAND_HODGMAN = 1;
+
+    private static final String HINT_SEGMENTS =
+            "Формат файла / ввода:\n" +
+                    "n (число отрезков)\n" +
+                    "X1 Y1 X2 Y2 (n строк с координатами отрезков)\n" +
+                    "Xmin Ymin Xmax Ymax (отсекающее окно)";
+
+    private static final String HINT_POLYGON =
+            "Формат файла / ввода:\n" +
+                    "n (число вершин многоугольника)\n" +
+                    "X Y (n строк с координатами вершин)\n" +
+                    "Xmin Ymin Xmax Ymax (отсекающее окно)";
+
+    private static final String DEFAULT_SEGMENTS_INPUT =
+            "6\n" +
+                    "2 1 8 6\n" +
+                    "4 3 6 4\n" +
+                    "1 4 4 7\n" +
+                    "2 6 8 1\n" +
+                    "0 1 2 5\n" +
+                    "3.5 1.5 3.5 5.5\n" +
+                    "3 2 7 5";
+
+    private static final String DEFAULT_POLYGON_INPUT =
+            "5\n" +
+                    "1 3\n" +
+                    "4 7\n" +
+                    "9 5\n" +
+                    "7 1\n" +
+                    "3 0\n" +
+                    "2 2 8 6";
+
+    private int currentMode = MODE_LIANG_BARSKY;
+    private double xmin = 3, ymin = 2, xmax = 7, ymax = 5;
+
+    private final List<Segment> inputSegments = new ArrayList<>();
+    private final List<LiangBarskyResult> lbResults = new ArrayList<>();
+
+    private final List<Point2D.Double> inputPolygon = new ArrayList<>();
+    private final List<Point2D.Double> clippedPolygon = new ArrayList<>();
+
+    private JComboBox<String> modeCombo;
+    private JTextArea formatHintArea;
+    private JTextArea inputArea;
+    private JTextArea outputArea;
+    private DrawPanel drawPanel;
+
+    public ClippingApp() {
+        super("Лабораторная работа 4 — Вариант 11");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setResizable(false);
+
+        initUI();
+        pack();
+        setLocationRelativeTo(null);
+        applyInput(DEFAULT_SEGMENTS_INPUT);
+    }
+
+    private void initUI() {
+        setLayout(new BorderLayout(8, 8));
+
+        JPanel controlPanel = new JPanel(new BorderLayout(8, 8));
+        controlPanel.setBorder(new EmptyBorder(10, 10, 10, 6));
+        controlPanel.setPreferredSize(new Dimension(370, 720));
+
+        JPanel topControls = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.insets = new Insets(0, 0, 6, 0);
+
+        gbc.gridy = 0;
+        topControls.add(new JLabel("Выбор алгоритма (Вариант 11):"), gbc);
+
+        modeCombo = new JComboBox<>(new String[]{
+                "Часть 1: Алгоритм Лианга-Барски (отрезки)",
+                "Часть 2: Отсечение выпуклого многоугольника"
+        });
+        modeCombo.addActionListener(e -> {
+            currentMode = modeCombo.getSelectedIndex();
+            if (currentMode == MODE_LIANG_BARSKY) {
+                formatHintArea.setText(HINT_SEGMENTS);
+                inputArea.setText(DEFAULT_SEGMENTS_INPUT);
+                applyInput(DEFAULT_SEGMENTS_INPUT);
+            } else {
+                formatHintArea.setText(HINT_POLYGON);
+                inputArea.setText(DEFAULT_POLYGON_INPUT);
+                applyInput(DEFAULT_POLYGON_INPUT);
+            }
+        });
+        gbc.gridy = 1;
+        topControls.add(modeCombo, gbc);
+
+        formatHintArea = new JTextArea(HINT_SEGMENTS);
+        formatHintArea.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        formatHintArea.setLineWrap(true);
+        formatHintArea.setWrapStyleWord(true);
+        formatHintArea.setEditable(false);
+        formatHintArea.setFocusable(false);
+        formatHintArea.setOpaque(false);
+        formatHintArea.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(210, 210, 210)),
+                new EmptyBorder(6, 8, 6, 8)
+        ));
+        gbc.gridy = 2;
+        topControls.add(formatHintArea, gbc);
+
+        JPanel buttonsPanel = new JPanel(new GridLayout(1, 2, 6, 6));
+        JButton loadBtn = new JButton("Загрузить файл...");
+        JButton applyBtn = new JButton("Применить");
+
+        loadBtn.addActionListener(e -> loadFromFile());
+        applyBtn.addActionListener(e -> applyInput(inputArea.getText()));
+
+        buttonsPanel.add(loadBtn);
+        buttonsPanel.add(applyBtn);
+        gbc.gridy = 3;
+        gbc.insets = new Insets(0, 0, 2, 0);
+        topControls.add(buttonsPanel, gbc);
+
+        inputArea = new JTextArea(DEFAULT_SEGMENTS_INPUT);
+        inputArea.setFont(new Font("Monospaced", Font.PLAIN, 13));
+        JScrollPane inputScroll = new JScrollPane(inputArea);
+        inputScroll.setBorder(BorderFactory.createTitledBorder("Исходные данные"));
+
+        outputArea = new JTextArea();
+        outputArea.setEditable(false);
+        outputArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        JScrollPane outputScroll = new JScrollPane(outputArea);
+        outputScroll.setBorder(BorderFactory.createTitledBorder("Результаты отсечения"));
+
+        JSplitPane textSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, inputScroll, outputScroll);
+        textSplit.setResizeWeight(0.45);
+        textSplit.setEnabled(false);
+
+        controlPanel.add(topControls, BorderLayout.NORTH);
+        controlPanel.add(textSplit, BorderLayout.CENTER);
+
+        drawPanel = new DrawPanel();
+        drawPanel.setPreferredSize(new Dimension(780, 720));
+        drawPanel.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+
+        add(controlPanel, BorderLayout.WEST);
+        add(drawPanel, BorderLayout.CENTER);
+    }
+
+    private void loadFromFile() {
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File file = chooser.getSelectedFile();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append("\n");
+                }
+                inputArea.setText(sb.toString().trim());
+                applyInput(inputArea.getText());
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(this, "Ошибка чтения файла: " + ex.getMessage(),
+                        "Ошибка", JOptionPane.ERROR_MESSAGE);
+            }
+        }
+    }
+
+    private List<double[]> parseLines(String text) {
+        List<double[]> rows = new ArrayList<>();
+        String[] lines = text.split("\\r?\\n");
+        for (String raw : lines) {
+            String cleaned = raw.replaceAll("\\*[^*]*\\*", " ").trim();
+            if (cleaned.isEmpty()) {
+                continue;
+            }
+            String[] parts = cleaned.split("\\s+");
+            double[] nums = new double[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                nums[i] = Double.parseDouble(parts[i].replace(',', '.'));
+            }
+            rows.add(nums);
+        }
+        return rows;
+    }
+
+    private void applyInput(String text) {
+        try {
+            List<double[]> rows = parseLines(text);
+            if (rows.size() < 2) {
+                throw new IllegalArgumentException("Недостаточно строк во входных данных.");
+            }
+
+            int n = (int) Math.round(rows.get(0)[0]);
+            if (rows.size() < n + 2) {
+                throw new IllegalArgumentException("Ожидается " + (n + 2) + " строк с данными.");
+            }
+
+            double[] winRow = rows.get(n + 1);
+            if (winRow.length < 4) {
+                throw new IllegalArgumentException("Строка окна должна содержать 4 координаты: Xmin Ymin Xmax Ymax.");
+            }
+
+            xmin = Math.min(winRow[0], winRow[2]);
+            xmax = Math.max(winRow[0], winRow[2]);
+            ymin = Math.min(winRow[1], winRow[3]);
+            ymax = Math.max(winRow[1], winRow[3]);
+
+            if (currentMode == MODE_LIANG_BARSKY) {
+                inputSegments.clear();
+                lbResults.clear();
+                for (int i = 1; i <= n; i++) {
+                    double[] r = rows.get(i);
+                    if (r.length < 4) {
+                        throw new IllegalArgumentException("Строка отрезка #" + i + " должна содержать 4 числа.");
+                    }
+                    Segment s = new Segment(r[0], r[1], r[2], r[3]);
+                    inputSegments.add(s);
+                    lbResults.add(clipLiangBarsky(s, xmin, ymin, xmax, ymax));
+                }
+                updateLiangBarskyLog();
+            } else {
+                inputPolygon.clear();
+                clippedPolygon.clear();
+                for (int i = 1; i <= n; i++) {
+                    double[] r = rows.get(i);
+                    if (r.length < 2) {
+                        throw new IllegalArgumentException("Строка вершины #" + i + " должна содержать минимум 2 числа.");
+                    }
+                    inputPolygon.add(new Point2D.Double(r[0], r[1]));
+                }
+                clippedPolygon.addAll(clipSutherlandHodgman(inputPolygon, xmin, ymin, xmax, ymax));
+                updateSutherlandHodgmanLog();
+            }
+
+            drawPanel.fitToData();
+            drawPanel.repaint();
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "Ошибка разбора данных: " + ex.getMessage(),
+                    "Ошибка", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private LiangBarskyResult clipLiangBarsky(Segment seg, double xmin, double ymin, double xmax, double ymax) {
+        double dx = seg.x2 - seg.x1;
+        double dy = seg.y2 - seg.y1;
+
+        double[] s = {-dy, -dx, dy, dx};
+        double[] q = {seg.y1 - ymin, seg.x1 - xmin, ymax - seg.y1, xmax - seg.x1};
+
+        double tIn = 0.0;
+        double tOut = 1.0;
+
+        for (int i = 0; i < 4; i++) {
+            if (Math.abs(s[i]) < 1e-12) {
+                if (q[i] < 0.0) {
+                    return new LiangBarskyResult(seg, null, tIn, tOut, false);
+                }
+            } else if (s[i] > 0.0) {
+                double t = q[i] / s[i];
+                if (t < tOut) {
+                    tOut = t;
+                }
+            } else {
+                double t = q[i] / s[i];
+                if (t > tIn) {
+                    tIn = t;
+                }
+            }
+        }
+
+        if (tIn > tOut) {
+            return new LiangBarskyResult(seg, null, tIn, tOut, false);
+        }
+
+        double nx1 = seg.x1 + tIn * dx;
+        double ny1 = seg.y1 + tIn * dy;
+        double nx2 = seg.x1 + tOut * dx;
+        double ny2 = seg.y1 + tOut * dy;
+
+        return new LiangBarskyResult(seg, new Segment(nx1, ny1, nx2, ny2), tIn, tOut, true);
+    }
+
+    private int computeOutcode(double x, double y, double xmin, double ymin, double xmax, double ymax) {
+        int code = 0;
+        if (y > ymax) {
+            code |= 8;
+        }
+        if (y < ymin) {
+            code |= 4;
+        }
+        if (x > xmax) {
+            code |= 2;
+        }
+        if (x < xmin) {
+            code |= 1;
+        }
+        return code;
+    }
+
+    private boolean isVisible(Point2D.Double p, int edge, double xmin, double ymin, double xmax, double ymax) {
+        int code = computeOutcode(p.x, p.y, xmin, ymin, xmax, ymax);
+        switch (edge) {
+            case 0:
+                return (code & 1) == 0;
+            case 1:
+                return (code & 2) == 0;
+            case 2:
+                return (code & 4) == 0;
+            default:
+                return (code & 8) == 0;
+        }
+    }
+
+    private Point2D.Double intersect(Point2D.Double p1, Point2D.Double p2, int edge,
+                                     double xmin, double ymin, double xmax, double ymax) {
+        double dx = p2.x - p1.x;
+        double dy = p2.y - p1.y;
+
+        if (edge == 0 || edge == 1) {
+            double xEdge = (edge == 0) ? xmin : xmax;
+            if (Math.abs(dx) < 1e-12) {
+                return new Point2D.Double(xEdge, p1.y);
+            }
+            double k = dy / dx;
+            double y = p1.y + k * (xEdge - p1.x);
+            return new Point2D.Double(xEdge, y);
+        } else {
+            double yEdge = (edge == 2) ? ymin : ymax;
+            if (Math.abs(dx) < 1e-12 || Math.abs(dy) < 1e-12) {
+                return new Point2D.Double(p1.x, yEdge);
+            }
+            double k = dy / dx;
+            double x = p1.x + (1.0 / k) * (yEdge - p1.y);
+            return new Point2D.Double(x, yEdge);
+        }
+    }
+
+    private List<Point2D.Double> clipSutherlandHodgman(List<Point2D.Double> polygon,
+                                                       double xmin, double ymin, double xmax, double ymax) {
+        List<Point2D.Double> current = new ArrayList<>(polygon);
+
+        for (int edge = 0; edge < 4; edge++) {
+            if (current.isEmpty()) {
+                break;
+            }
+            List<Point2D.Double> next = new ArrayList<>();
+            int size = current.size();
+
+            for (int i = 0; i < size; i++) {
+                Point2D.Double p1 = current.get(i);
+                Point2D.Double p2 = current.get((i + 1) % size);
+
+                boolean in1 = isVisible(p1, edge, xmin, ymin, xmax, ymax);
+                boolean in2 = isVisible(p2, edge, xmin, ymin, xmax, ymax);
+
+                if (in1 && in2) {
+                    next.add(p1);
+                } else if (in1 && !in2) {
+                    next.add(p1);
+                    next.add(intersect(p1, p2, edge, xmin, ymin, xmax, ymax));
+                } else if (!in1 && in2) {
+                    next.add(intersect(p1, p2, edge, xmin, ymin, xmax, ymax));
+                }
+            }
+
+            current = removeConsecutiveDuplicates(next);
+        }
+
+        return current;
+    }
+
+    private List<Point2D.Double> removeConsecutiveDuplicates(List<Point2D.Double> pts) {
+        List<Point2D.Double> cleaned = new ArrayList<>();
+        for (Point2D.Double p : pts) {
+            if (cleaned.isEmpty() || cleaned.get(cleaned.size() - 1).distance(p) > 1e-9) {
+                cleaned.add(p);
+            }
+        }
+        if (cleaned.size() > 1 && cleaned.get(0).distance(cleaned.get(cleaned.size() - 1)) <= 1e-9) {
+            cleaned.remove(cleaned.size() - 1);
+        }
+        return cleaned;
+    }
+
+    private void updateLiangBarskyLog() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(Locale.US, "Окно: [%.2f, %.2f] x [%.2f, %.2f]\n\n", xmin, xmax, ymin, ymax));
+        for (int i = 0; i < lbResults.size(); i++) {
+            LiangBarskyResult res = lbResults.get(i);
+            sb.append(String.format(Locale.US, "#%d: (%.2f, %.2f) -> (%.2f, %.2f)\n",
+                    i + 1, res.original.x1, res.original.y1, res.original.x2, res.original.y2));
+            if (res.visible) {
+                sb.append(String.format(Locale.US, "  t_вх = %.3f, t_вых = %.3f\n", res.tIn, res.tOut));
+                sb.append(String.format(Locale.US, "  Видимая часть: (%.2f, %.2f) -> (%.2f, %.2f)\n",
+                        res.clipped.x1, res.clipped.y1, res.clipped.x2, res.clipped.y2));
+            } else {
+                sb.append("  Отрезок полностью невидим.\n");
+            }
+        }
+        outputArea.setText(sb.toString());
+        outputArea.setCaretPosition(0);
+    }
+
+    private void updateSutherlandHodgmanLog() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(Locale.US, "Окно: [%.2f, %.2f] x [%.2f, %.2f]\n", xmin, xmax, ymin, ymax));
+        sb.append("Исходных вершин: ").append(inputPolygon.size()).append("\n");
+        sb.append("Вершин после отсечения: ").append(clippedPolygon.size()).append("\n\n");
+        if (clippedPolygon.isEmpty()) {
+            sb.append("Многоугольник полностью вне окна.\n");
+        } else {
+            sb.append("Видимые вершины:\n");
+            for (int i = 0; i < clippedPolygon.size(); i++) {
+                Point2D.Double p = clippedPolygon.get(i);
+                sb.append(String.format(Locale.US, "  V%d: (%.2f, %.2f)\n", i + 1, p.x, p.y));
+            }
+        }
+        outputArea.setText(sb.toString());
+        outputArea.setCaretPosition(0);
+    }
+
+    private class DrawPanel extends JPanel {
+        private double scale = 50.0;
+        private double centerX = 4.0;
+        private double centerY = 3.5;
+
+        DrawPanel() {
+            setBackground(Color.WHITE);
+        }
+
+        void fitToData() {
+            double minX = xmin;
+            double maxX = xmax;
+            double minY = ymin;
+            double maxY = ymax;
+
+            if (currentMode == MODE_LIANG_BARSKY) {
+                for (Segment s : inputSegments) {
+                    minX = Math.min(minX, Math.min(s.x1, s.x2));
+                    maxX = Math.max(maxX, Math.max(s.x1, s.x2));
+                    minY = Math.min(minY, Math.min(s.y1, s.y2));
+                    maxY = Math.max(maxY, Math.max(s.y1, s.y2));
+                }
+            } else {
+                for (Point2D.Double p : inputPolygon) {
+                    minX = Math.min(minX, p.x);
+                    maxX = Math.max(maxX, p.x);
+                    minY = Math.min(minY, p.y);
+                    maxY = Math.max(maxY, p.y);
+                }
+            }
+
+            minX = Math.min(minX, 0);
+            maxX = Math.max(maxX, 0);
+            minY = Math.min(minY, 0);
+            maxY = Math.max(maxY, 0);
+
+            double spanX = Math.max(1.0, maxX - minX);
+            double spanY = Math.max(1.0, maxY - minY);
+
+            centerX = (minX + maxX) / 2.0;
+            centerY = (minY + maxY) / 2.0;
+
+            int w = getWidth() > 0 ? getWidth() : getPreferredSize().width;
+            int h = getHeight() > 0 ? getHeight() : getPreferredSize().height;
+            scale = Math.min((w * 0.78) / spanX, (h * 0.78) / spanY);
+            repaint();
+        }
+
+        private double toScreenX(double wx) {
+            return getWidth() / 2.0 + (wx - centerX) * scale;
+        }
+
+        private double toScreenY(double wy) {
+            return getHeight() / 2.0 - (wy - centerY) * scale;
+        }
+
+        private double toWorldX(int sx) {
+            return centerX + (sx - getWidth() / 2.0) / scale;
+        }
+
+        private double toWorldY(int sy) {
+            return centerY - (sy - getHeight() / 2.0) / scale;
+        }
+
+        private double niceStep(double rawStep) {
+            double mag = Math.pow(10.0, Math.floor(Math.log10(rawStep)));
+            double norm = rawStep / mag;
+            if (norm < 1.5) {
+                return 1.0 * mag;
+            } else if (norm < 3.5) {
+                return 2.0 * mag;
+            } else if (norm < 7.5) {
+                return 5.0 * mag;
+            }
+            return 10.0 * mag;
+        }
+
+        private String formatTick(double v, double step) {
+            if (Math.abs(v) < step * 1e-6) {
+                return "0";
+            }
+            if (step >= 1.0 && Math.abs(v - Math.round(v)) < 1e-6) {
+                return String.valueOf(Math.round(v));
+            }
+            return String.format(Locale.US, "%.2f", v).replaceAll("0+$", "").replaceAll("\\.$", "");
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g;
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            drawCoordinateSystem(g2);
+            drawClippingWindow(g2);
+
+            if (currentMode == MODE_LIANG_BARSKY) {
+                drawLiangBarsky(g2);
+            } else {
+                drawSutherlandHodgman(g2);
+            }
+
+            drawLegend(g2);
+        }
+
+        private void drawCoordinateSystem(Graphics2D g2) {
+            int w = getWidth();
+            int h = getHeight();
+
+            double worldLeft = toWorldX(0);
+            double worldRight = toWorldX(w);
+            double worldBottom = toWorldY(h);
+            double worldTop = toWorldY(0);
+
+            double step = niceStep(65.0 / scale);
+
+            g2.setFont(new Font("SansSerif", Font.PLAIN, 11));
+            double startX = Math.floor(worldLeft / step) * step;
+            double startY = Math.floor(worldBottom / step) * step;
+
+            double axisScreenX = toScreenX(0);
+            double axisScreenY = toScreenY(0);
+
+            for (double x = startX; x <= worldRight; x += step) {
+                int sx = (int) Math.round(toScreenX(x));
+                g2.setColor(new Color(235, 238, 242));
+                g2.drawLine(sx, 0, sx, h);
+
+                if (Math.abs(x) > step * 1e-6) {
+                    int labelY = (int) Math.max(15, Math.min(h - 8, axisScreenY + 15));
+                    g2.setColor(Color.DARK_GRAY);
+                    g2.drawLine(sx, (int) Math.max(0, Math.min(h, axisScreenY)) - 3,
+                            sx, (int) Math.max(0, Math.min(h, axisScreenY)) + 3);
+                    g2.drawString(formatTick(x, step), sx - 8, labelY);
+                }
+            }
+
+            for (double y = startY; y <= worldTop; y += step) {
+                int sy = (int) Math.round(toScreenY(y));
+                g2.setColor(new Color(235, 238, 242));
+                g2.drawLine(0, sy, w, sy);
+
+                if (Math.abs(y) > step * 1e-6) {
+                    int labelX = (int) Math.max(6, Math.min(w - 35, axisScreenX + 6));
+                    g2.setColor(Color.DARK_GRAY);
+                    g2.drawLine((int) Math.max(0, Math.min(w, axisScreenX)) - 3, sy,
+                            (int) Math.max(0, Math.min(w, axisScreenX)) + 3, sy);
+                    g2.drawString(formatTick(y, step), labelX, sy + 4);
+                }
+            }
+
+            g2.setColor(new Color(70, 70, 70));
+            g2.setStroke(new BasicStroke(1.5f));
+
+            if (axisScreenY >= 0 && axisScreenY <= h) {
+                int ay = (int) Math.round(axisScreenY);
+                g2.drawLine(0, ay, w, ay);
+                g2.drawLine(w - 10, ay - 4, w, ay);
+                g2.drawLine(w - 10, ay + 4, w, ay);
+                g2.drawString("X", w - 18, Math.max(15, ay - 8));
+            }
+
+            if (axisScreenX >= 0 && axisScreenX <= w) {
+                int ax = (int) Math.round(axisScreenX);
+                g2.drawLine(ax, 0, ax, h);
+                g2.drawLine(ax - 4, 10, ax, 0);
+                g2.drawLine(ax + 4, 10, ax, 0);
+                g2.drawString("Y", Math.min(w - 18, ax + 8), 16);
+            }
+
+            if (axisScreenX >= 0 && axisScreenX <= w && axisScreenY >= 0 && axisScreenY <= h) {
+                g2.drawString("0", (int) axisScreenX + 5, (int) axisScreenY + 15);
+            }
+        }
+
+        private void drawClippingWindow(Graphics2D g2) {
+            double sx1 = toScreenX(xmin);
+            double sy1 = toScreenY(ymax);
+            double sw = (xmax - xmin) * scale;
+            double sh = (ymax - ymin) * scale;
+
+            Rectangle2D.Double rect = new Rectangle2D.Double(sx1, sy1, sw, sh);
+            g2.setColor(new Color(30, 120, 220, 35));
+            g2.fill(rect);
+            g2.setColor(new Color(20, 95, 200));
+            g2.setStroke(new BasicStroke(2.2f));
+            g2.draw(rect);
+        }
+
+        private void drawLiangBarsky(Graphics2D g2) {
+            Stroke dashed = new BasicStroke(1.8f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
+                    10.0f, new float[]{6.0f, 5.0f}, 0.0f);
+            g2.setStroke(dashed);
+            for (Segment s : inputSegments) {
+                g2.setColor(new Color(160, 160, 160));
+                g2.draw(new Line2D.Double(toScreenX(s.x1), toScreenY(s.y1), toScreenX(s.x2), toScreenY(s.y2)));
+                drawPoint(g2, s.x1, s.y1, new Color(130, 130, 130), 4);
+                drawPoint(g2, s.x2, s.y2, new Color(130, 130, 130), 4);
+            }
+
+            g2.setStroke(new BasicStroke(3.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            for (LiangBarskyResult res : lbResults) {
+                if (res.visible && res.clipped != null) {
+                    g2.setColor(new Color(215, 45, 45));
+                    g2.draw(new Line2D.Double(
+                            toScreenX(res.clipped.x1), toScreenY(res.clipped.y1),
+                            toScreenX(res.clipped.x2), toScreenY(res.clipped.y2)));
+                    drawPoint(g2, res.clipped.x1, res.clipped.y1, new Color(215, 45, 45), 5);
+                    drawPoint(g2, res.clipped.x2, res.clipped.y2, new Color(215, 45, 45), 5);
+                }
+            }
+        }
+
+        private void drawSutherlandHodgman(Graphics2D g2) {
+            if (inputPolygon.size() >= 2) {
+                Path2D.Double origPath = new Path2D.Double();
+                origPath.moveTo(toScreenX(inputPolygon.get(0).x), toScreenY(inputPolygon.get(0).y));
+                for (int i = 1; i < inputPolygon.size(); i++) {
+                    origPath.lineTo(toScreenX(inputPolygon.get(i).x), toScreenY(inputPolygon.get(i).y));
+                }
+                origPath.closePath();
+
+                g2.setColor(new Color(220, 130, 30, 30));
+                g2.fill(origPath);
+
+                Stroke dashed = new BasicStroke(2.0f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
+                        10.0f, new float[]{6.0f, 5.0f}, 0.0f);
+                g2.setStroke(dashed);
+                g2.setColor(new Color(200, 110, 20));
+                g2.draw(origPath);
+
+                for (Point2D.Double p : inputPolygon) {
+                    drawPoint(g2, p.x, p.y, new Color(200, 110, 20), 5);
+                }
+            }
+
+            if (clippedPolygon.size() >= 2) {
+                Path2D.Double clipPath = new Path2D.Double();
+                clipPath.moveTo(toScreenX(clippedPolygon.get(0).x), toScreenY(clippedPolygon.get(0).y));
+                for (int i = 1; i < clippedPolygon.size(); i++) {
+                    clipPath.lineTo(toScreenX(clippedPolygon.get(i).x), toScreenY(clippedPolygon.get(i).y));
+                }
+                clipPath.closePath();
+
+                g2.setColor(new Color(30, 165, 75, 70));
+                g2.fill(clipPath);
+
+                g2.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                g2.setColor(new Color(20, 135, 55));
+                g2.draw(clipPath);
+
+                for (Point2D.Double p : clippedPolygon) {
+                    drawPoint(g2, p.x, p.y, new Color(15, 110, 45), 6);
+                }
+            }
+        }
+
+        private void drawPoint(Graphics2D g2, double wx, double wy, Color color, int radius) {
+            double sx = toScreenX(wx);
+            double sy = toScreenY(wy);
+            g2.setColor(color);
+            g2.fill(new Ellipse2D.Double(sx - radius, sy - radius, radius * 2.0, radius * 2.0));
+        }
+
+        private void drawLegend(Graphics2D g2) {
+            int x = 14;
+            int y = 14;
+            int w = 235;
+            int h = 82;
+
+            g2.setColor(new Color(255, 255, 255, 225));
+            g2.fillRoundRect(x, y, w, h, 8, 8);
+            g2.setColor(Color.LIGHT_GRAY);
+            g2.setStroke(new BasicStroke(1.0f));
+            g2.drawRoundRect(x, y, w, h, 8, 8);
+
+            g2.setFont(new Font("SansSerif", Font.PLAIN, 12));
+
+            g2.setColor(new Color(20, 95, 200));
+            g2.setStroke(new BasicStroke(2.2f));
+            g2.drawLine(x + 12, y + 22, x + 38, y + 22);
+            g2.setColor(Color.BLACK);
+            g2.drawString("Отсекающее окно", x + 48, y + 26);
+
+            if (currentMode == MODE_LIANG_BARSKY) {
+                g2.setColor(new Color(150, 150, 150));
+                g2.drawLine(x + 12, y + 44, x + 38, y + 44);
+                g2.setColor(Color.BLACK);
+                g2.drawString("Исходные отрезки", x + 48, y + 48);
+
+                g2.setColor(new Color(215, 45, 45));
+                g2.setStroke(new BasicStroke(3.0f));
+                g2.drawLine(x + 12, y + 66, x + 38, y + 66);
+                g2.setColor(Color.BLACK);
+                g2.drawString("Видимые части", x + 48, y + 70);
+            } else {
+                g2.setColor(new Color(200, 110, 20));
+                g2.drawLine(x + 12, y + 44, x + 38, y + 44);
+                g2.setColor(Color.BLACK);
+                g2.drawString("Исходный многоугольник", x + 48, y + 48);
+
+                g2.setColor(new Color(20, 135, 55));
+                g2.setStroke(new BasicStroke(3.0f));
+                g2.drawLine(x + 12, y + 66, x + 38, y + 66);
+                g2.setColor(Color.BLACK);
+                g2.drawString("Видимый многоугольник", x + 48, y + 70);
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            ClippingApp app = new ClippingApp();
+            app.setVisible(true);
+        });
+    }
+}
